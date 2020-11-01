@@ -64,7 +64,23 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #define SKIP_BTN 1
 #define PREV_BTN 2
 
+// columns in localisation list stores
+
+#define CL_CNAME 0
+#define CL_CCODE 1
+
+#define LL_LNAME 0
+#define LL_LCODE 1
+#define LL_CCODE 2
+#define LL_CHARS 3
+
+#define TL_CITY  0
+#define TL_ZONE  1
+#define TL_CCODE 2  // must be the same as LL_CCODE to allow match_country to be used for both
+
 #define LABEL_WIDTH(name, w) {GtkWidget *l = (GtkWidget *) gtk_builder_get_object (builder, name); gtk_widget_set_size_request (l, w, -1);}
+
+#define FLAGFILE "/tmp/.wlflag"
 
 /* Controls */
 
@@ -78,7 +94,7 @@ static GtkWidget *pwd_hide, *psk_hide, *eng_chk, *uskey_chk, *uscan_chk;
 
 /* Lists for localisation */
 
-GtkListStore *locale_list, *tz_list;
+GtkListStore *country_list, *locale_list, *tz_list;
 GtkTreeModelSort *slang, *scity;
 GtkTreeModelFilter *fcount;
 
@@ -327,6 +343,7 @@ static gboolean show_ip (void);
 static void set_marketing_serial (void);
 static gboolean net_available (void);
 static int get_pi_keyboard (void);
+static gboolean srprompt (gpointer data);
 
 /* Helpers */
 
@@ -620,8 +637,38 @@ static gboolean ok_clicked (GtkButton *button, gpointer data)
 
 static gboolean loc_done (gpointer data)
 {
-    hide_message ();
-    gtk_notebook_next_page (GTK_NOTEBOOK (wizard_nb));
+    char *lang, *language, *lcall, *loc;
+    gint x, y;
+
+    remove (FLAGFILE);
+    sync ();
+
+    if (fork () == 0)
+    {
+        // new child process - set the new locale environment variables and then restart the wizard
+        lang = g_strdup_printf ("LANG=%s_%s%s", lc, cc, ext);
+        language = g_strdup_printf ("LANGUAGE=%s_%s%s", lc, cc, ext);
+        lcall = g_strdup_printf ("LC_ALL=%s_%s%s", lc, cc, ext);
+        putenv (lang);
+        putenv (language);
+        putenv (lcall);
+
+        gtk_window_get_position (GTK_WINDOW (main_dlg), &x, &y);
+        loc = g_strdup_printf ("%d:%d", x, y);
+
+#ifdef HOMESCHOOL
+        execl ("/usr/bin/sudo", "sudo", "-AE", "piwizhs", "--langset", loc, NULL);
+#else
+        execl ("/usr/bin/sudo", "sudo", "-AE", "piwiz", "--langset", loc, NULL);
+#endif
+        g_free (loc);
+        exit (0);
+    }
+    else
+    {
+        while (access (FLAGFILE, F_OK) == -1);
+        exit (0);
+    }
     return FALSE;
 }
 
@@ -713,7 +760,6 @@ static gpointer set_locale (gpointer data)
     g_free (lay);
     g_free (var);
     g_free (city);
-    g_free (ext);
 
     g_idle_add (loc_done, NULL);
     return NULL;
@@ -759,7 +805,9 @@ static void read_locales (void)
                     lname[0] = g_ascii_toupper (lname[0]);
 
                     gtk_list_store_append (locale_list, &iter);
-                    gtk_list_store_set (locale_list, &iter, 0, cptr1, 1, cptr2, 2, lname, 3, cname, 4, ext ? ".UTF-8" : "", -1);
+                    gtk_list_store_set (locale_list, &iter, LL_LCODE, cptr1, LL_CCODE, cptr2, LL_LNAME, lname, LL_CHARS, ext ? ".UTF-8" : "", -1);
+                    gtk_list_store_append (country_list, &iter);
+                    gtk_list_store_set (country_list, &iter, CL_CNAME, cname, CL_CCODE, cptr2, -1);
                     g_free (cname);
                     g_free (lname);
                 }
@@ -770,8 +818,8 @@ static void read_locales (void)
     }
 
     // sort and filter the database to produce the list for the country combo
-    scount = GTK_TREE_MODEL_SORT (gtk_tree_model_sort_new_with_model (GTK_TREE_MODEL (locale_list)));
-    gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (scount), 3, GTK_SORT_ASCENDING);
+    scount = GTK_TREE_MODEL_SORT (gtk_tree_model_sort_new_with_model (GTK_TREE_MODEL (country_list)));
+    gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (scount), CL_CNAME, GTK_SORT_ASCENDING);
     fcount = GTK_TREE_MODEL_FILTER (gtk_tree_model_filter_new (GTK_TREE_MODEL (scount), NULL));
     gtk_tree_model_filter_set_visible_func (fcount, (GtkTreeModelFilterVisibleFunc) unique_rows, NULL, NULL);
 
@@ -800,7 +848,7 @@ static void read_locales (void)
                     while (*cptr++) if (*cptr == '_') *cptr = ' ';
 
                     gtk_list_store_append (tz_list, &iter);
-                    gtk_list_store_set (tz_list, &iter, 0, cptr2, 1, cptr1, 2, cname, -1);
+                    gtk_list_store_set (tz_list, &iter, TL_ZONE, cptr2, TL_CCODE, cptr1, TL_CITY, cname, -1);
                     g_free (cname);
                 }
             }
@@ -817,8 +865,8 @@ static gboolean unique_rows (GtkTreeModel *model, GtkTreeIter *iter, gpointer da
     gboolean res;
 
     if (!gtk_tree_model_iter_next (model, &next)) return TRUE;
-    gtk_tree_model_get (model, iter, 1, &str1, -1);
-    gtk_tree_model_get (model, &next, 1, &str2, -1);
+    gtk_tree_model_get (model, iter, CL_CCODE, &str1, -1);
+    gtk_tree_model_get (model, &next, CL_CCODE, &str2, -1);
     if (!g_strcmp0 (str1, str2)) res = FALSE;
     else res = TRUE;
     g_free (str1);
@@ -836,13 +884,13 @@ static void country_changed (GtkComboBox *cb, gpointer ptr)
     // get the current country code from the combo box
     model = gtk_combo_box_get_model (GTK_COMBO_BOX (country_cb));
     gtk_combo_box_get_active_iter (GTK_COMBO_BOX (country_cb), &iter);
-    gtk_tree_model_get (model, &iter, 1, &str, -1);
+    gtk_tree_model_get (model, &iter, CL_CCODE, &str, -1);
 
     // filter and sort the master database for entries matching this code
     flang = GTK_TREE_MODEL_FILTER (gtk_tree_model_filter_new (GTK_TREE_MODEL (locale_list), NULL));
     gtk_tree_model_filter_set_visible_func (flang, (GtkTreeModelFilterVisibleFunc) match_country, str, NULL);
     slang = GTK_TREE_MODEL_SORT (gtk_tree_model_sort_new_with_model (GTK_TREE_MODEL (flang)));
-    gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (slang), 2, GTK_SORT_ASCENDING);
+    gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (slang), LL_LNAME, GTK_SORT_ASCENDING);
 
     // set up the combo box from the sorted and filtered list
     gtk_combo_box_set_model (GTK_COMBO_BOX (language_cb), GTK_TREE_MODEL (slang));
@@ -852,7 +900,7 @@ static void country_changed (GtkComboBox *cb, gpointer ptr)
     fcity = GTK_TREE_MODEL_FILTER (gtk_tree_model_filter_new (GTK_TREE_MODEL (tz_list), NULL));
     gtk_tree_model_filter_set_visible_func (fcity, (GtkTreeModelFilterVisibleFunc) match_country, str, NULL);
     scity = GTK_TREE_MODEL_SORT (gtk_tree_model_sort_new_with_model (GTK_TREE_MODEL (fcity)));
-    gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (scity), 2, GTK_SORT_ASCENDING);
+    gtk_tree_sortable_set_sort_column_id (GTK_TREE_SORTABLE (scity), TL_CITY, GTK_SORT_ASCENDING);
 
     // set up the combo box from the sorted and filtered list
     gtk_combo_box_set_model (GTK_COMBO_BOX (timezone_cb), GTK_TREE_MODEL (scity));
@@ -866,7 +914,7 @@ static gboolean match_country (GtkTreeModel *model, GtkTreeIter *iter, gpointer 
     char *str;
     gboolean res;
 
-    gtk_tree_model_get (model, iter, 1, &str, -1);
+    gtk_tree_model_get (model, iter, LL_CCODE, &str, -1);
     if (!g_strcmp0 (str, (char *) data)) res = TRUE;
     else res = FALSE;
     g_free (str);
@@ -875,7 +923,7 @@ static gboolean match_country (GtkTreeModel *model, GtkTreeIter *iter, gpointer 
 
 static void read_inits (void)
 {
-    char *buffer, *lc, *cc;
+    char *buffer, *llc, *lcc;
 
     init_country = NULL;
     init_lang = NULL;
@@ -889,12 +937,12 @@ static void read_inits (void)
     if (!buffer[0]) buffer = get_string ("grep LANG /etc/default/locale | cut -d = -f 2");
     if (buffer[0])
     {
-        lc = strtok (buffer, "_");
-        cc = strtok (NULL, ":. ");
-        if (lc && cc)
+        llc = strtok (buffer, "_");
+        lcc = strtok (NULL, ":. ");
+        if (llc && lcc)
         {
-            init_country = g_strdup (cc);
-            init_lang = g_strdup (lc);
+            init_country = g_strdup (lcc);
+            init_lang = g_strdup (llc);
         }
         g_free (buffer);
     }
@@ -1431,9 +1479,9 @@ static void next_page (GtkButton* btn, gpointer ptr)
         case PAGE_LOCALE :  // get the combo entries and look up relevant codes in database
                             model = gtk_combo_box_get_model (GTK_COMBO_BOX (language_cb));
                             gtk_combo_box_get_active_iter (GTK_COMBO_BOX (language_cb), &iter);
-                            gtk_tree_model_get (model, &iter, 0, &lc, -1);
-                            gtk_tree_model_get (model, &iter, 1, &cc, -1);
-                            gtk_tree_model_get (model, &iter, 4, &ext, -1);
+                            gtk_tree_model_get (model, &iter, LL_LCODE, &lc, -1);
+                            gtk_tree_model_get (model, &iter, LL_CCODE, &cc, -1);
+                            gtk_tree_model_get (model, &iter, LL_CHARS, &ext, -1);
                             wc = g_strdup (cc);
                             if (gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (eng_chk)))
                             {
@@ -1448,7 +1496,7 @@ static void next_page (GtkButton* btn, gpointer ptr)
 
                             model = gtk_combo_box_get_model (GTK_COMBO_BOX (timezone_cb));
                             gtk_combo_box_get_active_iter (GTK_COMBO_BOX (timezone_cb), &iter);
-                            gtk_tree_model_get (model, &iter, 0, &city, -1);
+                            gtk_tree_model_get (model, &iter, TL_ZONE, &city, -1);
 
                             if (gtk_toggle_button_get_active (GTK_TOGGLE_BUTTON (uskey_chk)))
                             {
@@ -1710,6 +1758,21 @@ static gboolean net_available (void)
     return val;
 }
 
+static gboolean srprompt (gpointer data)
+{
+    if (gtk_notebook_get_current_page (GTK_NOTEBOOK (wizard_nb)) == PAGE_INTRO)
+    {
+        if (net_available () && clock_synced ())
+        {
+            char *buf = g_strdup_printf ("aplay %s/srprompt.wav", PACKAGE_DATA_DIR);
+            system (buf);
+            g_free (buf);
+        }
+        return TRUE;
+    }
+    return FALSE;
+}
+
 
 /* The dialog... */
 
@@ -1751,7 +1814,8 @@ int main (int argc, char *argv[])
     gtk_icon_theme_prepend_search_path (gtk_icon_theme_get_default(), PACKAGE_DATA_DIR);
 
     // create the master databases
-    locale_list = gtk_list_store_new (5, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    locale_list = gtk_list_store_new (4, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
+    country_list = gtk_list_store_new (2, G_TYPE_STRING, G_TYPE_STRING);
     tz_list = gtk_list_store_new (3, G_TYPE_STRING, G_TYPE_STRING, G_TYPE_STRING);
     ap_list = gtk_list_store_new (5, G_TYPE_STRING, GDK_TYPE_PIXBUF, GDK_TYPE_PIXBUF, G_TYPE_INT, G_TYPE_INT);
 
@@ -1800,30 +1864,25 @@ int main (int argc, char *argv[])
     // set up the locale combo boxes
     read_locales ();
     wid = (GtkWidget *) gtk_builder_get_object (builder, "p1table");
-    country_cb = gtk_combo_box_new_with_model (GTK_TREE_MODEL (fcount));
-    language_cb = gtk_combo_box_new ();
-    timezone_cb = gtk_combo_box_new ();
-    gtk_table_attach (GTK_TABLE (wid), GTK_WIDGET (country_cb), 1, 2, 0, 1, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 0, 0);
-    gtk_table_attach (GTK_TABLE (wid), GTK_WIDGET (language_cb), 1, 2, 1, 2, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 0, 0);
-    gtk_table_attach (GTK_TABLE (wid), GTK_WIDGET (timezone_cb), 1, 2, 2, 3, GTK_FILL | GTK_SHRINK, GTK_FILL | GTK_SHRINK, 0, 0);
-    gtk_widget_set_tooltip_text (GTK_WIDGET (country_cb), _("Set the country in which you are using your Pi"));
-    gtk_widget_set_tooltip_text (GTK_WIDGET (language_cb), _("Set the language in which applications should appear"));
-    gtk_widget_set_tooltip_text (GTK_WIDGET (timezone_cb), _("Set the closest city to your location"));
+    country_cb = (GtkWidget *) gtk_builder_get_object (builder, "p1comb1");
+    language_cb = (GtkWidget *) gtk_builder_get_object (builder, "p1comb2");
+    timezone_cb = (GtkWidget *) gtk_builder_get_object (builder, "p1comb3");
+    gtk_combo_box_set_model (GTK_COMBO_BOX (country_cb), GTK_TREE_MODEL (fcount));
 
     // set up cell renderers to associate list columns with combo boxes
     col = gtk_cell_renderer_text_new ();
     gtk_cell_layout_pack_start (GTK_CELL_LAYOUT (country_cb), col, FALSE);
-    gtk_cell_layout_add_attribute (GTK_CELL_LAYOUT (country_cb), col, "text", 3);
+    gtk_cell_layout_add_attribute (GTK_CELL_LAYOUT (country_cb), col, "text", CL_CNAME);
     gtk_cell_layout_pack_start (GTK_CELL_LAYOUT (language_cb), col, FALSE);
-    gtk_cell_layout_add_attribute (GTK_CELL_LAYOUT (language_cb), col, "text", 2);
+    gtk_cell_layout_add_attribute (GTK_CELL_LAYOUT (language_cb), col, "text", LL_LNAME);
     gtk_cell_layout_pack_start (GTK_CELL_LAYOUT (timezone_cb), col, FALSE);
-    gtk_cell_layout_add_attribute (GTK_CELL_LAYOUT (timezone_cb), col, "text", 2);
+    gtk_cell_layout_add_attribute (GTK_CELL_LAYOUT (timezone_cb), col, "text", TL_CITY);
 
     // initialise the country combo
     g_signal_connect (country_cb, "changed", G_CALLBACK (country_changed), NULL);
-    set_init (GTK_TREE_MODEL (fcount), country_cb, 1, kbd ? kb_countries[kbd] : init_country);
-    set_init (GTK_TREE_MODEL (slang), language_cb, 0, kbd ? kb_langs[kbd] : init_lang);
-    set_init (GTK_TREE_MODEL (scity), timezone_cb, 0, kbd ? kb_tzs[kbd] : init_tz);
+    set_init (GTK_TREE_MODEL (fcount), country_cb, CL_CCODE, kbd ? kb_countries[kbd] : init_country);
+    set_init (GTK_TREE_MODEL (slang), language_cb, LL_LCODE, kbd ? kb_langs[kbd] : init_lang);
+    set_init (GTK_TREE_MODEL (scity), timezone_cb, TL_ZONE, kbd ? kb_tzs[kbd] : init_tz);
 
     // make an educated guess as to whether a US keyboard override was set
     char *ilay = NULL, *ivar = NULL;
@@ -1868,6 +1927,23 @@ int main (int argc, char *argv[])
 
     /* start timed event to detect IP address being available */
     g_timeout_add (1000, (GSourceFunc) show_ip, NULL);
+
+    /* start timed event to prompt for screen reader install if not already installed */
+    res = system ("dpkg -l orca | grep -q ii");
+    if (res) g_timeout_add_seconds (15, srprompt, NULL);
+
+    /* if restarting after language set, skip to password page */
+    if (argc == 3 && !g_strcmp0 (argv[1], "--langset"))
+    {
+        gint x, y;
+        sscanf (argv[2], "%d:%d", &x, &y);
+        gtk_window_move (GTK_WINDOW (main_dlg), x, y);
+
+        gtk_notebook_set_current_page (GTK_NOTEBOOK (wizard_nb), PAGE_PASSWD);
+
+        /* touch the flag file to close the old window on restart */
+        fclose (fopen (FLAGFILE, "wb"));
+    }
 
     res = gtk_dialog_run (GTK_DIALOG (main_dlg));
 
